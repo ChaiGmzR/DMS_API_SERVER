@@ -5,6 +5,20 @@ Set-Location $root
 
 $venvPython = ".\.venv\Scripts\python.exe"
 
+if (-not (Test-Path ".\.env")) {
+    if (Test-Path ".\.env.example") {
+        Copy-Item ".\.env.example" ".\.env"
+    }
+
+    throw @"
+Falta configurar .env en la raiz de DMS_API_SERVER.
+Se creo .env desde .env.example si el archivo de ejemplo estaba disponible.
+Edita .env con las credenciales reales de MySQL y vuelve a ejecutar:
+  notepad .env
+  .\scripts\start.ps1
+"@
+}
+
 function Resolve-Python {
     if ($env:PYTHON_EXE -and (Test-Path $env:PYTHON_EXE)) {
         return @($env:PYTHON_EXE)

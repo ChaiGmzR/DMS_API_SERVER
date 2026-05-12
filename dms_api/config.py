@@ -9,7 +9,13 @@ def required_env(name: str) -> str:
             f"Falta la variable {name}. Crea el archivo .env en la raiz de DMS_API_SERVER "
             "o define la variable de entorno antes de arrancar el servicio."
         )
-    return value.strip()
+
+    clean = value.strip()
+    if clean in {"CAMBIAR_EN_SERVER", "change-me", "<password real>", "<cadena larga privada>"}:
+        raise RuntimeError(
+            f"La variable {name} todavia tiene un valor de ejemplo. Edita .env con el valor real."
+        )
+    return clean
 
 
 def int_env(name: str, default: str) -> int:
