@@ -20,11 +20,25 @@ Backend independiente para las aplicaciones DMS Flutter/Web.
 
 ## Arranque en Windows
 
+Requisito en el servidor: Python 3.11 o superior instalado.
+Si el servidor no tiene Python:
+
+```powershell
+winget install -e --id Python.Python.3.13
+```
+
 ```powershell
 cd C:\Users\jesus\OneDrive\Documents\Desarrollo\DMS_API_SERVER
-py -3.13 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe run.py
+.\scripts\start.ps1
+```
+
+`scripts\start.ps1` crea `.venv`, instala dependencias y arranca el servicio.
+Si Python esta instalado en una ruta no estandar, define `PYTHON_EXE` antes de
+ejecutarlo:
+
+```powershell
+$env:PYTHON_EXE="C:\Path\To\python.exe"
+.\scripts\start.ps1
 ```
 
 El servicio escucha en `0.0.0.0:5000`. Desde las apps usa:
