@@ -1,5 +1,6 @@
 from flask import Flask
 from dotenv import load_dotenv
+from pathlib import Path
 
 from .config import Settings
 from .db import Database
@@ -7,7 +8,8 @@ from .routes import register_routes
 
 
 def create_app() -> Flask:
-    load_dotenv()
+    project_root = Path(__file__).resolve().parents[1]
+    load_dotenv(project_root / ".env")
 
     app = Flask(__name__)
     settings = Settings.from_env()

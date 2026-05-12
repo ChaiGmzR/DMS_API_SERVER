@@ -27,6 +27,27 @@ Si el servidor no tiene Python:
 winget install -e --id Python.Python.3.13
 ```
 
+Crear el archivo `.env` en la raiz del proyecto. Este archivo no se sube a git:
+
+```powershell
+cd C:\Users\Administrator\Documents\ILSANMES\DMS_API_SERVER
+Copy-Item .env.example .env
+notepad .env
+```
+
+Verifica que `.env` tenga los valores reales:
+
+```text
+MYSQL_HOST=192.168.1.10
+MYSQL_PORT=3306
+MYSQL_DATABASE=mes_production
+MYSQL_USER=mes_admin
+MYSQL_PASSWORD=<password real>
+DMS_TOKEN_SECRET=<cadena larga privada>
+DMS_TOKEN_MAX_AGE_SECONDS=86400
+PORT=5000
+```
+
 ```powershell
 cd C:\Users\jesus\OneDrive\Documents\Desarrollo\DMS_API_SERVER
 .\scripts\start.ps1
