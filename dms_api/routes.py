@@ -30,6 +30,10 @@ DEFECTO_STATUS = {
     "Rechazado",
     "Aprobado",
 }
+DEFAULT_DEFECTOS_LIMIT = 1000
+MAX_DEFECTOS_LIMIT = 50000
+DEFAULT_DEFECTOS_PAGE_SIZE = 100
+MAX_DEFECTOS_PAGE_SIZE = 500
 AREAS_USUARIO = [
     {"value": "LQC", "label": "LQC", "description": "Para inspectores de LQC"},
     {"value": "OQC", "label": "OQC", "description": "Para inspectores de OQC"},
@@ -60,6 +64,44 @@ def json_error(message: str, status: int = 500, details: Any | None = None):
 
 def body() -> dict[str, Any]:
     return request.get_json(silent=True) or {}
+
+
+def parse_limit(value: str | None) -> int | None:
+    if value is None or value.strip() == "":
+        return DEFAULT_DEFECTOS_LIMIT
+
+    normalized = value.strip().lower()
+    if normalized in {"0", "all", "none", "unlimited"}:
+        return None
+
+    try:
+        limit = int(normalized)
+    except ValueError:
+        raise ValueError("limit debe ser numerico, 0 o all") from None
+
+    if limit < 1:
+        raise ValueError("limit debe ser mayor a 0")
+    return min(limit, MAX_DEFECTOS_LIMIT)
+
+
+def parse_positive_int(
+    value: str | None,
+    *,
+    default: int,
+    max_value: int | None = None,
+    name: str,
+) -> int:
+    if value is None or value.strip() == "":
+        return default
+
+    try:
+        parsed = int(value.strip())
+    except ValueError:
+        raise ValueError(f"{name} debe ser numerico") from None
+
+    if parsed < 1:
+        raise ValueError(f"{name} debe ser mayor a 0")
+    return min(parsed, max_value) if max_value is not None else parsed
 
 
 def public_user(user: dict[str, Any]) -> dict[str, Any]:
@@ -417,7 +459,7 @@ def register_routes(app: Flask):
     @app.get("/api/defectos")
     def list_defectos():
         try:
-            query = """
+            select_clause = """
                 SELECT
                   d.id,
                   d.fecha,
@@ -432,6 +474,8 @@ def register_routes(app: Flask):
                   d.status,
                   COALESCE(u.nombre_completo, d.registrado_por) AS registrado_por,
                   d.fecha_envio_reparacion
+            """
+            from_clause = """
                 FROM defect_data d
                 LEFT JOIN raw r
                   ON r.part_no COLLATE utf8mb4_unicode_ci =
@@ -444,20 +488,55 @@ def register_routes(app: Flask):
             params: list[Any] = []
             filters = request.args
             if filters.get("fecha"):
-                query += " AND DATE(d.fecha) = %s"
+                from_clause += " AND DATE(d.fecha) = %s"
                 params.append(filters["fecha"])
             if filters.get("fechaInicio") and filters.get("fechaFin"):
-                query += " AND DATE(d.fecha) BETWEEN %s AND %s"
+                from_clause += " AND DATE(d.fecha) BETWEEN %s AND %s"
                 params.extend([filters["fechaInicio"], filters["fechaFin"]])
             for key, column in [("linea", "d.linea"), ("area", "d.area"), ("status", "d.status"), ("tipo_inspeccion", "d.tipo_inspeccion"), ("etapa_deteccion", "d.etapa_deteccion")]:
                 if filters.get(key):
-                    query += f" AND {column} = %s"
+                    from_clause += f" AND {column} = %s"
                     params.append(filters[key])
             for key, column in [("codigo", "d.codigo"), ("defecto", "d.defecto"), ("ubicacion", "d.ubicacion")]:
                 if filters.get(key):
-                    query += f" AND {column} LIKE %s"
+                    from_clause += f" AND {column} LIKE %s"
                     params.append(f"%{filters[key]}%")
-            query += " ORDER BY d.fecha DESC LIMIT 1000"
+
+            paginated = filters.get("page") is not None or filters.get("pageSize") is not None
+            if paginated:
+                try:
+                    page = parse_positive_int(filters.get("page"), default=1, name="page")
+                    page_size = parse_positive_int(
+                        filters.get("pageSize"),
+                        default=DEFAULT_DEFECTOS_PAGE_SIZE,
+                        max_value=MAX_DEFECTOS_PAGE_SIZE,
+                        name="pageSize",
+                    )
+                except ValueError as exc:
+                    return json_error("Parametros de paginacion invalidos", 400, exc)
+
+                count_query = f"SELECT COUNT(*) AS total {from_clause}"
+                total_row = db().fetch_one(count_query, params) or {}
+                total = int(total_row.get("total") or 0)
+                offset = (page - 1) * page_size
+                query = f"{select_clause} {from_clause} ORDER BY d.fecha DESC LIMIT %s OFFSET %s"
+                rows = db().fetch_all(query, [*params, page_size, offset])
+                return jsonify({
+                    "data": rows,
+                    "total": total,
+                    "page": page,
+                    "pageSize": page_size,
+                })
+
+            try:
+                limit = parse_limit(filters.get("limit"))
+            except ValueError as exc:
+                return json_error("Parametro limit invalido", 400, exc)
+
+            query = f"{select_clause} {from_clause} ORDER BY d.fecha DESC"
+            if limit is not None:
+                query += " LIMIT %s"
+                params.append(limit)
             return jsonify(db().fetch_all(query, params))
         except Exception as exc:
             return json_error("Error al consultar defectos", 500, exc)
