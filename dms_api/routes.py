@@ -14,6 +14,8 @@ from .db import Database, serialize_row
 
 ROLES_CALIDAD = ["Inspector_LQC", "Inspector_OQC"]
 ROLES_PRODUCCION = ["Reparador"]
+AREAS_CALIDAD_USUARIOS = ["Calidad", "LQC", "OQC"]
+AREAS_PRODUCCION_USUARIOS = ["Produccion", "Reparador"]
 TODOS_LOS_ROLES = [
     *ROLES_CALIDAD,
     *ROLES_PRODUCCION,
@@ -34,9 +36,22 @@ DEFAULT_DEFECTOS_LIMIT = 1000
 MAX_DEFECTOS_LIMIT = 50000
 DEFAULT_DEFECTOS_PAGE_SIZE = 100
 MAX_DEFECTOS_PAGE_SIZE = 500
+DEFECT_PART_NO_SQL = """
+CASE
+  WHEN d.codigo LIKE '%;%;%'
+   AND SUBSTRING_INDEX(SUBSTRING_INDEX(d.codigo, ';', 3), ';', -1) LIKE 'EBR%'
+  THEN SUBSTRING_INDEX(SUBSTRING_INDEX(d.codigo, ';', 3), ';', -1)
+  ELSE SUBSTRING(d.codigo, 1, 11)
+END
+"""
+DEFECT_TABLES_BY_AREA = {
+    "SMD": "defect_data_smd",
+}
+DEFAULT_DEFECT_TABLE = "defect_data"
 AREAS_USUARIO = [
     {"value": "LQC", "label": "LQC", "description": "Para inspectores de LQC"},
     {"value": "OQC", "label": "OQC", "description": "Para inspectores de OQC"},
+    {"value": "SMD", "label": "SMD", "description": "Usuarios y supervisores del area SMD"},
     {"value": "Reparador", "label": "Reparador", "description": "Para reparadores"},
     {"value": "Calidad", "label": "Calidad", "description": "Para Supervisor de Calidad"},
     {"value": "Produccion", "label": "Produccion", "description": "Para Supervisor de Produccion"},
@@ -102,6 +117,68 @@ def parse_positive_int(
     if parsed < 1:
         raise ValueError(f"{name} debe ser mayor a 0")
     return min(parsed, max_value) if max_value is not None else parsed
+
+
+def part_code_for_lookup(codigo: str) -> str:
+    normalized = codigo.upper().strip()
+    parts = [part.strip().upper() for part in normalized.split(";")]
+    if len(parts) >= 3 and parts[2].startswith("EBR"):
+        return parts[2]
+    return normalized
+
+
+def defect_table_for_user(user: dict[str, Any]) -> str:
+    area = str(user.get("area") or "").strip()
+    return DEFECT_TABLES_BY_AREA.get(area, DEFAULT_DEFECT_TABLE)
+
+
+def validate_table_name(table: str) -> str:
+    allowed = {DEFAULT_DEFECT_TABLE, *DEFECT_TABLES_BY_AREA.values()}
+    if table not in allowed:
+        raise ValueError(f"Tabla de defectos no permitida: {table}")
+    return table
+
+
+def manageable_user_areas(user: dict[str, Any]) -> list[str]:
+    user_role = user.get("rol") or ""
+    user_area = user.get("area")
+    if user_role == "Admin":
+        return [area["value"] for area in AREAS_USUARIO]
+    if user_role == "Supervisor_Calidad":
+        if user_area == "SMD":
+            return ["SMD"]
+        return AREAS_CALIDAD_USUARIOS
+    if user_role == "Supervisor_Produccion":
+        if user_area and user_area not in {"Administracion", "Produccion"}:
+            return [user_area]
+        return AREAS_PRODUCCION_USUARIOS
+    return []
+
+
+def user_area_options(user: dict[str, Any]) -> list[dict[str, str]]:
+    allowed = set(manageable_user_areas(user))
+    return [area for area in AREAS_USUARIO if area["value"] in allowed]
+
+
+def is_known_user_area(area: str | None) -> bool:
+    if area is None:
+        return True
+    return any(option["value"] == area for option in AREAS_USUARIO)
+
+
+def scoped_user_area(user: dict[str, Any], requested_area: Any) -> str | None:
+    area = None if requested_area in (None, "") else str(requested_area)
+    if user.get("rol") == "Admin":
+        return area
+
+    allowed_areas = manageable_user_areas(user)
+    if not allowed_areas:
+        raise ValueError("No tienes areas asignadas para administrar usuarios")
+    if area is None:
+        return allowed_areas[0]
+    if area not in allowed_areas:
+        raise ValueError("Solo puedes administrar usuarios de tus areas permitidas")
+    return area
 
 
 def public_user(user: dict[str, Any]) -> dict[str, Any]:
@@ -250,10 +327,12 @@ def user_scope_clause(user: dict[str, Any], prefix: str = "WHERE") -> tuple[str,
         return (" AND 1=0" if prefix == "AND" else " WHERE 1=0"), []
     clause = f" {prefix} rol IN ({', '.join(['%s'] * len(roles))})"
     params: list[Any] = list(roles)
-    user_area = user.get("area")
-    if user_area and user_area != "Administracion":
-        clause += " AND area = %s"
-        params.append(user_area)
+    areas = manageable_user_areas(user)
+    if not areas:
+        clause += " AND 1=0"
+    else:
+        clause += f" AND area IN ({', '.join(['%s'] * len(areas))})"
+        params.extend(areas)
     return clause, params
 
 
@@ -282,6 +361,7 @@ def register_routes(app: Flask):
                 WHERE table_schema = DATABASE()
                   AND table_name IN (
                     'defect_data',
+                    'defect_data_smd',
                     'repair_data',
                     'usuarios_dms',
                     'audit_log_dms',
@@ -381,7 +461,7 @@ def register_routes(app: Flask):
     @app.get("/api/modelo")
     def get_modelo():
         try:
-            codigo = str(request.args.get("codigo") or "").upper().strip()
+            codigo = part_code_for_lookup(str(request.args.get("codigo") or ""))
             if len(codigo) < 3:
                 return jsonify({"modelo": ""})
             row = db().fetch_one(
@@ -409,6 +489,7 @@ def register_routes(app: Flask):
         return jsonify({"success": True, "message": "Modelo registrado"})
 
     @app.post("/api/defectos")
+    @require_auth
     def create_defecto():
         try:
             data = body()
@@ -429,10 +510,11 @@ def register_routes(app: Flask):
             if data["etapa_deteccion"] not in ETAPAS_DETECCION:
                 return json_error("etapa_deteccion invalida", 400, "Valores validos: " + ", ".join(sorted(ETAPAS_DETECCION)))
 
+            table = validate_table_name(defect_table_for_user(current_user()))
             defect_id = generate_id("DEF")
             db().execute(
-                """
-                INSERT INTO defect_data
+                f"""
+                INSERT INTO {table}
                   (id, fecha, linea, codigo, defecto, ubicacion, area, modelo,
                    tipo_inspeccion, etapa_deteccion, registrado_por)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -457,8 +539,10 @@ def register_routes(app: Flask):
             return json_error("Error al guardar el defecto", 500, exc)
 
     @app.get("/api/defectos")
+    @require_auth
     def list_defectos():
         try:
+            table = validate_table_name(defect_table_for_user(current_user()))
             select_clause = """
                 SELECT
                   d.id,
@@ -475,11 +559,11 @@ def register_routes(app: Flask):
                   COALESCE(u.nombre_completo, d.registrado_por) AS registrado_por,
                   d.fecha_envio_reparacion
             """
-            from_clause = """
-                FROM defect_data d
+            from_clause = f"""
+                FROM {table} d
                 LEFT JOIN raw r
                   ON r.part_no COLLATE utf8mb4_unicode_ci =
-                     SUBSTRING(d.codigo, 1, 11) COLLATE utf8mb4_unicode_ci
+                     ({DEFECT_PART_NO_SQL}) COLLATE utf8mb4_unicode_ci
                 LEFT JOIN usuarios_dms u
                   ON u.username COLLATE utf8mb4_unicode_ci =
                      d.registrado_por COLLATE utf8mb4_unicode_ci
@@ -542,18 +626,22 @@ def register_routes(app: Flask):
             return json_error("Error al consultar defectos", 500, exc)
 
     @app.get("/api/defectos/<defect_id>")
+    @require_auth
     def get_defecto(defect_id: str):
-        row = db().fetch_one("SELECT * FROM defect_data WHERE id = %s", (defect_id,))
+        table = validate_table_name(defect_table_for_user(current_user()))
+        row = db().fetch_one(f"SELECT * FROM {table} WHERE id = %s", (defect_id,))
         if row is None:
             return json_error("Defecto no encontrado", 404)
         return jsonify(row)
 
     @app.put("/api/defectos/<defect_id>/status")
+    @require_auth
     def update_defecto_status(defect_id: str):
         status = body().get("status")
         if status not in DEFECTO_STATUS:
             return json_error("Status invalido", 400, "Valores validos: " + ", ".join(sorted(DEFECTO_STATUS)))
-        result = db().execute("UPDATE defect_data SET status = %s WHERE id = %s", (status, defect_id))
+        table = validate_table_name(defect_table_for_user(current_user()))
+        result = db().execute(f"UPDATE {table} SET status = %s WHERE id = %s", (status, defect_id))
         if result["affected"] == 0:
             return json_error("Defecto no encontrado", 404)
         return jsonify({"success": True, "message": "Status actualizado correctamente"})
@@ -824,7 +912,7 @@ def register_routes(app: Flask):
     @app.get("/api/usuarios/areas/list")
     @require_admin_role
     def get_areas():
-        return jsonify({"success": True, "data": AREAS_USUARIO})
+        return jsonify({"success": True, "data": user_area_options(current_user())})
 
     @app.get("/api/usuarios")
     @require_admin_role
@@ -862,7 +950,12 @@ def register_routes(app: Flask):
         password = str(data.get("password") or "")
         nombre_completo = str(data.get("nombre_completo") or "").strip()
         rol = data.get("rol")
-        area = data.get("area")
+        try:
+            area = scoped_user_area(current_user(), data.get("area"))
+        except ValueError as exc:
+            return json_error("Area no permitida", 403, exc)
+        if not is_known_user_area(area):
+            return json_error("Area invalida", 400, f"Area recibida: {area}")
         if not username or not password or not nombre_completo or not rol:
             return json_error("Campos requeridos: username, password, nombre_completo, rol", 400)
         allowed = roles_gestionables(current_user().get("rol") or "")
@@ -908,10 +1001,19 @@ def register_routes(app: Flask):
             return json_error(f"No tienes permisos para asignar el rol: {data.get('rol')}", 403, "Roles permitidos: " + ", ".join(allowed))
         fields = []
         values: list[Any] = []
-        for key in ("nombre_completo", "rol", "area"):
+        for key in ("nombre_completo", "rol"):
             if key in data:
                 fields.append(f"{key} = %s")
                 values.append(data.get(key))
+        if "area" in data:
+            try:
+                area = scoped_user_area(current_user(), data.get("area"))
+            except ValueError as exc:
+                return json_error("Area no permitida", 403, exc)
+            if not is_known_user_area(area):
+                return json_error("Area invalida", 400, f"Area recibida: {area}")
+            fields.append("area = %s")
+            values.append(area)
         if "activo" in data:
             fields.append("activo = %s")
             values.append(coerce_bool(data.get("activo")))
