@@ -38,8 +38,8 @@ DEFAULT_DEFECTOS_PAGE_SIZE = 100
 MAX_DEFECTOS_PAGE_SIZE = 500
 DEFECT_PART_NO_SQL = """
 CASE
-  WHEN d.codigo LIKE '%%;%%;%%'
-   AND SUBSTRING_INDEX(SUBSTRING_INDEX(d.codigo, ';', 3), ';', -1) LIKE 'EBR%%'
+  WHEN INSTR(d.codigo, ';') > 0
+   AND LEFT(SUBSTRING_INDEX(SUBSTRING_INDEX(d.codigo, ';', 3), ';', -1), 3) = 'EBR'
   THEN SUBSTRING_INDEX(SUBSTRING_INDEX(d.codigo, ';', 3), ';', -1)
   ELSE SUBSTRING(d.codigo, 1, 11)
 END
