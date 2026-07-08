@@ -14,17 +14,19 @@ from .db import Database, serialize_row
 
 ROLES_CALIDAD = ["Inspector_LQC", "Inspector_OQC"]
 ROLES_PRODUCCION = ["Reparador"]
+ROLES_SMD = ["Operador_SMD", "Supervisor_SMD"]
 AREAS_CALIDAD_USUARIOS = ["Calidad", "LQC", "OQC"]
 AREAS_PRODUCCION_USUARIOS = ["Produccion", "Reparador"]
 TODOS_LOS_ROLES = [
     *ROLES_CALIDAD,
     *ROLES_PRODUCCION,
+    *ROLES_SMD,
     "Supervisor_Calidad",
     "Supervisor_Produccion",
     "Admin",
 ]
 TIPOS_INSPECCION = {"ICT", "FCT", "Packing", "Visual"}
-ETAPAS_DETECCION = {"LQC", "OQC"}
+ETAPAS_DETECCION = {"LQC", "OQC", "SMD"}
 DEFECTO_STATUS = {
     "Pendiente_Reparacion",
     "En_Reparacion",
@@ -144,9 +146,9 @@ def manageable_user_areas(user: dict[str, Any]) -> list[str]:
     user_area = user.get("area")
     if user_role == "Admin":
         return [area["value"] for area in AREAS_USUARIO]
+    if user_role == "Supervisor_SMD" or (user_role == "Supervisor_Calidad" and user_area == "SMD"):
+        return ["SMD"]
     if user_role == "Supervisor_Calidad":
-        if user_area == "SMD":
-            return ["SMD"]
         return AREAS_CALIDAD_USUARIOS
     if user_role == "Supervisor_Produccion":
         if user_area and user_area not in {"Administracion", "Produccion"}:
@@ -179,6 +181,20 @@ def scoped_user_area(user: dict[str, Any], requested_area: Any) -> str | None:
     if area not in allowed_areas:
         raise ValueError("Solo puedes administrar usuarios de tus areas permitidas")
     return area
+
+
+def manageable_user_roles(user: dict[str, Any]) -> list[str]:
+    user_role = user.get("rol") or ""
+    user_area = user.get("area")
+    if user_role == "Admin":
+        return TODOS_LOS_ROLES
+    if user_role == "Supervisor_SMD" or (user_role == "Supervisor_Calidad" and user_area == "SMD"):
+        return ROLES_SMD
+    if user_role == "Supervisor_Calidad":
+        return ROLES_CALIDAD
+    if user_role == "Supervisor_Produccion":
+        return ROLES_PRODUCCION
+    return []
 
 
 def public_user(user: dict[str, Any]) -> dict[str, Any]:
@@ -287,7 +303,7 @@ require_qa_role = require_role(
     "Acceso denegado. Se requiere rol de Supervisor Calidad o Admin",
 )
 require_admin_role = require_role(
-    {"Admin", "Supervisor_Calidad", "Supervisor_Produccion"},
+    {"Admin", "Supervisor_Calidad", "Supervisor_SMD", "Supervisor_Produccion"},
     "Acceso denegado. Se requiere rol de Administrador o Supervisor",
 )
 
@@ -295,6 +311,8 @@ require_admin_role = require_role(
 def roles_gestionables(user_role: str) -> list[str]:
     if user_role == "Admin":
         return TODOS_LOS_ROLES
+    if user_role == "Supervisor_SMD":
+        return ROLES_SMD
     if user_role == "Supervisor_Calidad":
         return ROLES_CALIDAD
     if user_role == "Supervisor_Produccion":
@@ -319,10 +337,9 @@ def coerce_bool(value: Any) -> int:
 
 
 def user_scope_clause(user: dict[str, Any], prefix: str = "WHERE") -> tuple[str, list[Any]]:
-    user_role = user.get("rol") or ""
-    if user_role == "Admin":
+    if user.get("rol") == "Admin":
         return "", []
-    roles = roles_gestionables(user_role)
+    roles = manageable_user_roles(user)
     if not roles:
         return (" AND 1=0" if prefix == "AND" else " WHERE 1=0"), []
     clause = f" {prefix} rol IN ({', '.join(['%s'] * len(roles))})"
@@ -897,13 +914,14 @@ def register_routes(app: Flask):
     @app.get("/api/usuarios/roles/list")
     @require_admin_role
     def get_roles():
-        user_role = current_user().get("rol") or ""
-        allowed = set(roles_gestionables(user_role))
+        allowed = set(manageable_user_roles(current_user()))
         roles = [
             {"value": "Inspector_LQC", "label": "Inspector LQC", "description": "Inspeccion en linea de produccion (LQC)"},
             {"value": "Inspector_OQC", "label": "Inspector OQC", "description": "Inspeccion de calidad final (OQC)"},
+            {"value": "Operador_SMD", "label": "Operador SMD", "description": "Captura de defectos del area SMD"},
             {"value": "Reparador", "label": "Reparador", "description": "Reparacion de defectos"},
             {"value": "Supervisor_Calidad", "label": "Supervisor Calidad", "description": "Administra inspectores LQC y OQC"},
+            {"value": "Supervisor_SMD", "label": "Supervisor SMD", "description": "Administra operadores y supervisores SMD"},
             {"value": "Supervisor_Produccion", "label": "Supervisor Produccion", "description": "Administra reparadores"},
             {"value": "Admin", "label": "Administrador", "description": "Acceso completo al sistema"},
         ]
@@ -958,7 +976,7 @@ def register_routes(app: Flask):
             return json_error("Area invalida", 400, f"Area recibida: {area}")
         if not username or not password or not nombre_completo or not rol:
             return json_error("Campos requeridos: username, password, nombre_completo, rol", 400)
-        allowed = roles_gestionables(current_user().get("rol") or "")
+        allowed = manageable_user_roles(current_user())
         if rol not in allowed:
             return json_error(f"No tienes permisos para crear usuarios con el rol: {rol}", 403, "Roles permitidos: " + ", ".join(allowed))
         if db().fetch_one("SELECT id FROM usuarios_dms WHERE username = %s", (username,)):
@@ -996,7 +1014,7 @@ def register_routes(app: Flask):
         check_params.extend(scope_params)
         if db().fetch_one(check_query, check_params) is None:
             return json_error("Usuario no encontrado o sin permisos para editarlo", 404)
-        allowed = roles_gestionables(current_user().get("rol") or "")
+        allowed = manageable_user_roles(current_user())
         if data.get("rol") is not None and data.get("rol") not in allowed:
             return json_error(f"No tienes permisos para asignar el rol: {data.get('rol')}", 403, "Roles permitidos: " + ", ".join(allowed))
         fields = []
