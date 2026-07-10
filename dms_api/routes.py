@@ -17,6 +17,7 @@ ROLES_PRODUCCION = ["Reparador"]
 ROLES_SMD = ["Operador_SMD", "Supervisor_SMD"]
 AREAS_CALIDAD_USUARIOS = ["Calidad", "LQC", "OQC"]
 AREAS_PRODUCCION_USUARIOS = ["Produccion", "Reparador"]
+LINEAS_SMD = {"Line A", "Line B", "Line C", "Line D", "Line E"}
 TODOS_LOS_ROLES = [
     *ROLES_CALIDAD,
     *ROLES_PRODUCCION,
@@ -132,6 +133,10 @@ def part_code_for_lookup(codigo: str) -> str:
 def defect_table_for_user(user: dict[str, Any]) -> str:
     area = str(user.get("area") or "").strip()
     return DEFECT_TABLES_BY_AREA.get(area, DEFAULT_DEFECT_TABLE)
+
+
+def is_smd_user(user: dict[str, Any]) -> bool:
+    return user.get("area") == "SMD" or user.get("rol") in {"Operador_SMD", "Supervisor_SMD"}
 
 
 def validate_table_name(table: str) -> str:
@@ -522,12 +527,19 @@ def register_routes(app: Flask):
             ]
             if any(not data.get(field) for field in required):
                 return json_error("Faltan campos requeridos", 400, "Se requieren: " + ", ".join(required))
+            user = current_user()
+            smd_user = is_smd_user(user)
+            if smd_user:
+                data["area"] = "SMD"
             if data["tipo_inspeccion"] not in TIPOS_INSPECCION:
                 return json_error("tipo_inspeccion invalido", 400, "Valores validos: " + ", ".join(sorted(TIPOS_INSPECCION)))
-            if data["etapa_deteccion"] not in ETAPAS_DETECCION:
-                return json_error("etapa_deteccion invalida", 400, "Valores validos: " + ", ".join(sorted(ETAPAS_DETECCION)))
+            allowed_stages = {"SMD"} if smd_user else {"LQC", "OQC"}
+            if data["etapa_deteccion"] not in allowed_stages:
+                return json_error("etapa_deteccion invalida", 400, "Valores validos: " + ", ".join(sorted(allowed_stages)))
+            if smd_user and data["linea"] not in LINEAS_SMD:
+                return json_error("linea invalida para SMD", 400, "Valores validos: " + ", ".join(sorted(LINEAS_SMD)))
 
-            table = validate_table_name(defect_table_for_user(current_user()))
+            table = validate_table_name(defect_table_for_user(user))
             defect_id = generate_id("DEF")
             db().execute(
                 f"""
