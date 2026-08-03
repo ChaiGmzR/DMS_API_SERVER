@@ -47,6 +47,18 @@ CASE
   ELSE SUBSTRING(d.codigo, 1, 11)
 END
 """
+DEFECT_MODEL_LOOKUP_SQL = f"""
+(
+  SELECT pn.model
+  FROM part_numbers pn
+  WHERE ({DEFECT_PART_NO_SQL}) LIKE CONCAT(pn.part_number, '%%')
+    AND pn.model IS NOT NULL
+    AND pn.model != ''
+    AND pn.active = 1
+  ORDER BY LENGTH(pn.part_number) DESC
+  LIMIT 1
+)
+"""
 DEFECT_TABLES_BY_AREA = {
     "SMD": "defect_data_smd",
 }
@@ -128,6 +140,26 @@ def part_code_for_lookup(codigo: str) -> str:
     if len(parts) >= 3 and parts[2].startswith("EBR"):
         return parts[2]
     return normalized
+
+
+def lookup_model(codigo: str) -> str:
+    part_code = part_code_for_lookup(codigo)
+    if len(part_code) < 3:
+        return ""
+    row = db().fetch_one(
+        """
+        SELECT model
+        FROM part_numbers
+        WHERE %s LIKE CONCAT(part_number, '%%')
+          AND model IS NOT NULL
+          AND model != ''
+          AND active = 1
+        ORDER BY LENGTH(part_number) DESC
+        LIMIT 1
+        """,
+        (part_code,),
+    )
+    return (row or {}).get("model") or ""
 
 
 def defect_table_for_user(user: dict[str, Any]) -> str:
@@ -483,23 +515,7 @@ def register_routes(app: Flask):
     @app.get("/api/modelo")
     def get_modelo():
         try:
-            codigo = part_code_for_lookup(str(request.args.get("codigo") or ""))
-            if len(codigo) < 3:
-                return jsonify({"modelo": ""})
-            row = db().fetch_one(
-                """
-                SELECT model
-                FROM part_numbers
-                WHERE %s LIKE CONCAT(part_number, '%%')
-                  AND model IS NOT NULL
-                  AND model != ''
-                  AND active = 1
-                ORDER BY LENGTH(part_number) DESC
-                LIMIT 1
-                """,
-                (codigo,),
-            )
-            return jsonify({"modelo": (row or {}).get("model") or ""})
+            return jsonify({"modelo": lookup_model(str(request.args.get("codigo") or ""))})
         except Exception as exc:
             return json_error("Error al buscar modelo", 500, exc)
 
@@ -540,6 +556,8 @@ def register_routes(app: Flask):
                 return json_error("linea invalida para SMD", 400, "Valores validos: " + ", ".join(sorted(LINEAS_SMD)))
 
             table = validate_table_name(defect_table_for_user(user))
+            codigo = str(data["codigo"]).upper().strip()
+            modelo = data.get("modelo") or lookup_model(codigo)
             defect_id = generate_id("DEF")
             db().execute(
                 f"""
@@ -552,11 +570,11 @@ def register_routes(app: Flask):
                     defect_id,
                     data.get("fecha") or time.strftime("%Y-%m-%d %H:%M:%S"),
                     data["linea"],
-                    str(data["codigo"]).upper().strip(),
+                    codigo,
                     data["defecto"],
                     str(data["ubicacion"]).upper().strip(),
                     data["area"],
-                    data.get("modelo") or "",
+                    modelo,
                     data["tipo_inspeccion"],
                     data["etapa_deteccion"],
                     data["registrado_por"],
@@ -572,7 +590,7 @@ def register_routes(app: Flask):
     def list_defectos():
         try:
             table = validate_table_name(defect_table_for_user(current_user()))
-            select_clause = """
+            select_clause = f"""
                 SELECT
                   d.id,
                   d.fecha,
@@ -581,7 +599,7 @@ def register_routes(app: Flask):
                   d.defecto,
                   d.ubicacion,
                   d.area,
-                  COALESCE(r.project, d.modelo, 'N/A') AS modelo,
+                  COALESCE(NULLIF(r.project, ''), NULLIF(d.modelo, ''), {DEFECT_MODEL_LOOKUP_SQL}, 'N/A') AS modelo,
                   d.tipo_inspeccion,
                   d.etapa_deteccion,
                   d.status,
