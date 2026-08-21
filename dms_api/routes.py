@@ -339,6 +339,10 @@ require_qa_role = require_role(
     {"Supervisor_Calidad", "Admin"},
     "Acceso denegado. Se requiere rol de Supervisor Calidad o Admin",
 )
+require_qa_catalog_role = require_role(
+    {"Supervisor_Calidad", "Admin"},
+    "Acceso denegado. Se requiere rol de Supervisor Calidad o Admin",
+)
 require_admin_role = require_role(
     {"Admin", "Supervisor_Calidad", "Supervisor_SMD", "Supervisor_Produccion"},
     "Acceso denegado. Se requiere rol de Administrador o Supervisor",
@@ -371,6 +375,10 @@ def coerce_bool(value: Any) -> int:
     if isinstance(value, (int, float)):
         return 1 if value else 0
     return 1 if str(value).strip().lower() in {"1", "true", "yes", "si", "on"} else 0
+
+
+def normalize_defect_name(value: Any) -> str:
+    return str(value or "").strip().upper()
 
 
 def user_scope_clause(user: dict[str, Any], prefix: str = "WHERE") -> tuple[str, list[Any]]:
@@ -940,6 +948,122 @@ def register_routes(app: Flask):
                 (dias,),
             )
         )
+
+    @app.get("/api/catalogos/defectos")
+    @require_auth
+    def list_qa_defect_catalog():
+        rows = db().fetch_all(
+            """
+            SELECT id, defect_name
+            FROM pcb_defect_catalog
+            WHERE QA = 1
+            ORDER BY defect_name
+            """
+        )
+        return jsonify({"success": True, "data": rows})
+
+    @app.post("/api/catalogos/defectos")
+    @require_qa_catalog_role
+    def create_qa_defect_catalog_item():
+        defect_name = normalize_defect_name(
+            body().get("defect_name") or body().get("name") or body().get("nombre")
+        )
+        if not defect_name:
+            return json_error("El nombre del defecto es requerido", 400)
+
+        existing = db().fetch_one(
+            """
+            SELECT id, defect_name
+            FROM pcb_defect_catalog
+            WHERE defect_name = %s
+            LIMIT 1
+            """,
+            (defect_name,),
+        )
+        if existing is not None:
+            db().execute(
+                "UPDATE pcb_defect_catalog SET QA = 1 WHERE id = %s",
+                (existing["id"],),
+            )
+            row = db().fetch_one(
+                "SELECT id, defect_name FROM pcb_defect_catalog WHERE id = %s",
+                (existing["id"],),
+            )
+            return jsonify(
+                {
+                    "success": True,
+                    "message": "Defecto habilitado para QA",
+                    "data": row,
+                }
+            )
+
+        result = db().execute(
+            """
+            INSERT INTO pcb_defect_catalog
+              (defect_name, is_active, SMD, ASSY, QA, created_by)
+            VALUES (%s, 0, 0, 0, 1, %s)
+            """,
+            (defect_name, current_user().get("username") or current_user().get("nombre_completo")),
+        )
+        row = db().fetch_one(
+            "SELECT id, defect_name FROM pcb_defect_catalog WHERE id = %s",
+            (result["lastrowid"],),
+        )
+        return jsonify({"success": True, "message": "Defecto creado para QA", "data": row}), 201
+
+    @app.put("/api/catalogos/defectos/<int:defect_id>")
+    @require_qa_catalog_role
+    def update_qa_defect_catalog_item(defect_id: int):
+        defect_name = normalize_defect_name(
+            body().get("defect_name") or body().get("name") or body().get("nombre")
+        )
+        if not defect_name:
+            return json_error("El nombre del defecto es requerido", 400)
+
+        row = db().fetch_one(
+            "SELECT id FROM pcb_defect_catalog WHERE id = %s AND QA = 1",
+            (defect_id,),
+        )
+        if row is None:
+            return json_error("Defecto QA no encontrado", 404)
+
+        conflict = db().fetch_one(
+            """
+            SELECT id, QA
+            FROM pcb_defect_catalog
+            WHERE defect_name = %s AND id <> %s
+            LIMIT 1
+            """,
+            (defect_name, defect_id),
+        )
+        if conflict is not None:
+            if coerce_bool(conflict.get("QA")) == 1:
+                return json_error("Ya existe un defecto QA con ese nombre", 409)
+            return json_error(
+                "Ese defecto ya existe para otra area. Para usarlo en QA, crealo desde Nuevo con el mismo nombre.",
+                409,
+            )
+
+        db().execute(
+            "UPDATE pcb_defect_catalog SET defect_name = %s WHERE id = %s AND QA = 1",
+            (defect_name, defect_id),
+        )
+        updated = db().fetch_one(
+            "SELECT id, defect_name FROM pcb_defect_catalog WHERE id = %s",
+            (defect_id,),
+        )
+        return jsonify({"success": True, "message": "Defecto actualizado", "data": updated})
+
+    @app.delete("/api/catalogos/defectos/<int:defect_id>")
+    @require_qa_catalog_role
+    def disable_qa_defect_catalog_item(defect_id: int):
+        result = db().execute(
+            "UPDATE pcb_defect_catalog SET QA = 0 WHERE id = %s AND QA = 1",
+            (defect_id,),
+        )
+        if result["affected"] == 0:
+            return json_error("Defecto QA no encontrado", 404)
+        return jsonify({"success": True, "message": "Defecto removido del catalogo QA"})
 
     @app.get("/api/usuarios/roles/list")
     @require_admin_role
